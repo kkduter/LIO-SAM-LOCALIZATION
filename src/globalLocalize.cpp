@@ -212,8 +212,8 @@ public:
     {
 	//std::cout << "come in" << std::endl;
 
-        file_state.open("/home/touchair/sensor_fusion_ws/src/LIO-SAM/data/lio_state.txt");
-        file_gps.open("/home/touchair/sensor_fusion_ws/src/LIO-SAM/data/lio_gps.txt");
+        file_state.open("/home/touchair/sensor_fusion_ws/src/LIO-SAM-LOCALIZATION/result/lio_state.txt");
+        file_gps.open("/home/touchair/sensor_fusion_ws/src/LIO-SAM-LOCALIZATION/result/lio_gps.txt");
 
         ISAM2Params parameters;
         parameters.relinearizeThreshold = 0.1;
@@ -423,11 +423,11 @@ public:
 
         Eigen::Matrix3d gps_to_state;
 
-        gps_to_state << 0.995213,    -0.0977265,      0,
-                        0.0977265,    0.995213,       0,
-                        0,            0,              1;
+        // gps_to_state << 0.995213,    -0.0977265,      0,
+        //                 0.0977265,    0.995213,       0,
+        //                 0,            0,              1;
             
-        point_enu = gps_to_state * point_enu;
+        // point_enu = gps_to_state * point_enu;
 
         geometry_msgs::PoseStamped pose_gps_stamped;
         pose_gps_stamped.header.stamp = gpsMsg->header.stamp;
