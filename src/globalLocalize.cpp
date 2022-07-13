@@ -6,6 +6,11 @@
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
 
+
+#include <tf/tf.h>
+#include <tf/transform_datatypes.h>
+#include <tf/transform_broadcaster.h>
+
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/slam/PriorFactor.h>
@@ -72,6 +77,7 @@ public:
     ros::Publisher pubOdomAftMappedROS;
     ros::Publisher pubKeyPoses;
     ros::Publisher pubPath;
+    ros::Publisher pubPathGPS;
     ros::Publisher pubGPS;
 
     ros::Publisher pubHistoryKeyFrames;
@@ -160,6 +166,7 @@ public:
     int imuPreintegrationResetId = 0;
 
     nav_msgs::Path globalPath;
+    nav_msgs::Path gpsPath;
 
     Eigen::Affine3f transPointAssociateToMap;
 
@@ -196,6 +203,7 @@ public:
 
     geometry_msgs::PoseStamped poseOdomToMap;
     ros::Publisher pubOdomToMapPose;
+    ros::Publisher pubPoseToMap;
 
 
     /*************added by gc******************/
@@ -215,8 +223,9 @@ public:
         pubKeyPoses = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/trajectory", 1);
         pubLaserCloudSurround = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/map_global", 1);
         pubOdomAftMappedROS = nh.advertise<nav_msgs::Odometry> ("lio_sam/mapping/odometry", 1);
-        pubPath = nh.advertise<nav_msgs::Path>("lio_sam/mapping/path", 1);
-        pubGPS = nh.advertise<nav_msgs::Odometry> ("lio_sam/gps/odometry", 1);
+        pubPath = nh.advertise<nav_msgs::Path>("lio_sam/global/path", 1);
+        pubPathGPS = nh.advertise<nav_msgs::Path>("lio_sam/gps/path", 1);
+        
 
         subLaserCloudInfo = nh.subscribe<lio_sam::cloud_info>("lio_sam/feature/cloud_info", 10, &mapOptimization::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
         // subGPS = nh.subscribe<nav_msgs::Odometry> (gpsTopic, 200, &mapOptimization::gpsHandler, this, ros::TransportHints().tcpNoDelay());
@@ -229,6 +238,8 @@ public:
         //fortest_publasercloudINWorld = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/laserclouinmapframe",1);
         pubLaserCloudInWorld = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/lasercloud_in_world", 1);//added
         pubOdomToMapPose = nh.advertise<geometry_msgs::PoseStamped>("lio_sam/mapping/pose_odomTo_map", 1);
+        pubPoseToMap = nh.advertise<geometry_msgs::PoseStamped>("lio_sam/global/pose", 1);
+        pubGPS = nh.advertise<geometry_msgs::PoseStamped> ("lio_sam/gps/pose", 1);
 
         //subImu      = nh.subscribe<sensor_msgs::Imu>  (imuTopic,  200, &mapOptimization::imuHandler,      this, ros::TransportHints().tcpNoDelay());
         //added ******************by gc
@@ -400,37 +411,59 @@ public:
         if(!gps_init)
         {
             gps_init = true;
-            geoConverter.Reset(gpsMsg->latitude, gpsMsg->longitude, gpsMsg->altitude);
+            geoConverter.Reset(22.3304807923, 114.179526047, 11.7615366792);
+            // geoConverter.Reset(gpsMsg->latitude, gpsMsg->longitude, gpsMsg->altitude);
         }
 
         Eigen::Vector3d point_enu;
         geoConverter.Forward(gpsMsg->latitude, gpsMsg->longitude, gpsMsg->altitude, point_enu[0], point_enu[1], point_enu[2]);
 
-        nav_msgs::Odometry odom;
-        odom.header.stamp = gpsMsg->header.stamp;
-        odom.header.frame_id = "odom";
 
-        odom.pose.pose.position.x = point_enu[0];
-        odom.pose.pose.position.y = point_enu[1];
-        odom.pose.pose.position.z = point_enu[2];
+        // map -> base_link
 
-        odom.pose.pose.orientation.x = 0;
-        odom.pose.pose.orientation.y = 0;
-        odom.pose.pose.orientation.z = 0;
-        odom.pose.pose.orientation.w = 1;
+        Eigen::Matrix3d gps_to_state;
 
-        pubGPS.publish(odom);
+        gps_to_state << 0.995213,    -0.0977265,      0,
+                        0.0977265,    0.995213,       0,
+                        0,            0,              1;
+            
+        point_enu = gps_to_state * point_enu;
+
+        geometry_msgs::PoseStamped pose_gps_stamped;
+        pose_gps_stamped.header.stamp = gpsMsg->header.stamp;
+        pose_gps_stamped.header.frame_id = "map";
+        pose_gps_stamped.pose.position.x = point_enu[0];
+        pose_gps_stamped.pose.position.y = point_enu[1];
+        pose_gps_stamped.pose.position.z = transformInTheWorld[5];
+        pose_gps_stamped.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(transformInTheWorld[0], transformInTheWorld[1], transformInTheWorld[2]);
+        pubGPS.publish(pose_gps_stamped);
+
+
+        gpsPath.poses.push_back(pose_gps_stamped);
+
+        // publish gps path
+        if (pubPathGPS.getNumSubscribers() != 0)
+        {
+            gpsPath.header.stamp = gpsMsg->header.stamp;
+            gpsPath.header.frame_id = "map";
+            pubPathGPS.publish(gpsPath);
+        }
+
+
+        Eigen::Affine3f transformInTheWorld_new = pcl::getTransformation(transformInTheWorld[3], transformInTheWorld[4],transformInTheWorld[5],transformInTheWorld[0],transformInTheWorld[1],transformInTheWorld[2]);
+        Eigen::Matrix4f pose_state = transformInTheWorld_new.matrix();
 
         Eigen::Matrix4f pose_gps;
-        pose_gps.setIdentity();
-        pose_gps.block<3,1>(0,3) = Eigen::Vector3f(point_enu[0], point_enu[1], point_enu[2]);
+        pose_gps.block<3,3>(0,0) = pose_state.block<3,3>(0,0);
+        pose_gps.block<3,1>(0,3) = Eigen::Vector3f(point_enu[0], point_enu[1], transformInTheWorld[5]);
 
-        Eigen::Matrix4f pose_state;
-        pose_state.setIdentity();
-        pose_state.block<3,1>(0,3) = Eigen::Vector3f(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5]);
+        // Eigen::Matrix4f pose_state;
+        // pose_state.setIdentity();
+        // pose_state.block<3,1>(0,3) = Eigen::Vector3f(transformInTheWorld[3], transformInTheWorld[4], transformInTheWorld[5]);
+        // pose_state.block<3,1>(0,3) = Eigen::Vector3f(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5]);
 
-        savePose(file_gps, pose_gps);
         savePose(file_state, pose_state);
+        savePose(file_gps, pose_gps);
 
     }    
 
@@ -1264,27 +1297,9 @@ public:
         /*added    gc*/
 
         // save path for visualization
-        updatePath(thisPose6D);
+        // updatePath(thisPose6D);
     }
 
-
-
-    void updatePath(const PointTypePose& pose_in)
-    {
-        geometry_msgs::PoseStamped pose_stamped;
-        pose_stamped.header.stamp = ros::Time().fromSec(pose_in.time);
-        pose_stamped.header.frame_id = "odom";
-        pose_stamped.pose.position.x = pose_in.x;
-        pose_stamped.pose.position.y = pose_in.y;
-        pose_stamped.pose.position.z = pose_in.z;
-        tf::Quaternion q = tf::createQuaternionFromRPY(pose_in.roll, pose_in.pitch, pose_in.yaw);
-        pose_stamped.pose.orientation.x = q.x();
-        pose_stamped.pose.orientation.y = q.y();
-        pose_stamped.pose.orientation.z = q.z();
-        pose_stamped.pose.orientation.w = q.w();
-
-        globalPath.poses.push_back(pose_stamped);
-    }
 
     void publishOdometry()
     {
@@ -1292,7 +1307,7 @@ public:
         nav_msgs::Odometry laserOdometryROS;
         laserOdometryROS.header.stamp = timeLaserInfoStamp;
         laserOdometryROS.header.frame_id = "odom";
-        laserOdometryROS.child_frame_id = "odom_mapping";
+        laserOdometryROS.child_frame_id = "base_link";
         laserOdometryROS.pose.pose.position.x = transformTobeMapped[3];
         laserOdometryROS.pose.pose.position.y = transformTobeMapped[4];
         laserOdometryROS.pose.pose.position.z = transformTobeMapped[5];
@@ -1350,13 +1365,7 @@ public:
             *cloudOut = *transformPointCloud(cloudOut,  &thisPose6D);
             publishCloud(pubCloudRegisteredRaw, cloudOut, timeLaserInfoStamp, "odom");
         }
-        // publish path
-        if (pubPath.getNumSubscribers() != 0)
-        {
-            globalPath.header.stamp = timeLaserInfoStamp;
-            globalPath.header.frame_id = "odom";
-            pubPath.publish(globalPath);
-        }
+        
     }
 
     /*************added by gc*****Todo: (1) ICP or matching point to edge and surface?  (2) global_pcd or whole keyframes************/
@@ -1377,7 +1386,9 @@ public:
     void globalLocalizeThread()
     {
 
-        //ros::Rate rate(0.2);
+        // std::cout << "global localizee thread" << std::endl;
+
+        // ros::Rate rate(1);
         while (ros::ok())
         {
             //avoid ICP using the same initial guess for many times
@@ -1393,18 +1404,20 @@ public:
             }
             else
             {
-		        ros::Duration(10.0).sleep();
+		        ros::Duration(1.0).sleep();
+
+                // std::cout << "ICP match" << std::endl;
 
                 double t_start = ros::Time::now().toSec();
                 ICPscanMatchGlobal();
                 double t_end = ros::Time::now().toSec();
-                //std::cout << "ICP time consuming: " << t_end-t_start;
+                std::cout << "ICP time consuming: " << t_end-t_start << "  ";
                 
             }
 
 
 
-            //rate.sleep();
+            // rate.sleep();
             //}
         }
     }
@@ -1436,6 +1449,8 @@ public:
         icp.setEuclideanFitnessEpsilon(1e-6);
         icp.setRANSACIterations(0);
 
+        // laserCloudIn header -> base_link
+        // cloudGlobalMapDS  header -> map
         ndt.setInputSource(laserCloudIn);
         ndt.setInputTarget(cloudGlobalMapDS);
         pcl::PointCloud<PointType>::Ptr unused_result_0(new pcl::PointCloud<PointType>());
@@ -1450,12 +1465,13 @@ public:
         icp.setInputTarget(cloudGlobalMapDS);
         pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
         icp.align(*unused_result, ndt.getFinalTransformation());
-        std::cout << "the pose before initializing is: x" << transformInTheWorld[3] << " y" << transformInTheWorld[4]
-                  << " z" << transformInTheWorld[5] <<std::endl;
-	    std::cout << "the pose in odom before initializing is: x" << tranformOdomToWorld[3] << " y" << tranformOdomToWorld[4]
-                  << " z" << tranformOdomToWorld[5] <<std::endl;
+        std::cout << "the pose before initializing is: x: " << transformInTheWorld[3] << " y: " << transformInTheWorld[4]
+                  << " z: " << transformInTheWorld[5] <<std::endl;
+	    std::cout << "the pose in odom before initializing is: x: " << tranformOdomToWorld[3] << " y: " << tranformOdomToWorld[4]
+                  << " z: " << tranformOdomToWorld[5] <<std::endl;
         std::cout << "the icp score in initializing process is: " << icp.getFitnessScore() << std::endl;
-        std::cout << "the pose after initializing process is: "<< icp.getFinalTransformation() << std::endl;
+        std::cout << "the pose after initializing process is: " << std::endl;
+        std::cout << icp.getFinalTransformation() << std::endl;
 
         PointTypePose thisPose6DInOdom = trans2PointTypePose(transformTobeMapped);
 	    std::cout<< "transformTobeMapped X_Y_Z: " << transformTobeMapped[3] << " " << transformTobeMapped[4] << " " << transformTobeMapped[5] << std::endl;
@@ -1486,8 +1502,8 @@ public:
         tranformOdomToWorld[4] = deltay;
         tranformOdomToWorld[5] = deltaz;
         mtxtranformOdomToWorld.unlock();
-	    std::cout << "the pose of odom relative to Map: x" << tranformOdomToWorld[3] << " y" << tranformOdomToWorld[4]
-                  << " z" << tranformOdomToWorld[5] <<std::endl;
+	    std::cout << "the pose of odom relative to Map: x: " << tranformOdomToWorld[3] << " y: " << tranformOdomToWorld[4]
+                  << " z: " << tranformOdomToWorld[5] <<std::endl;
         publishCloud(pubLaserCloudInWorld, unused_result, timeLaserInfoStamp, "map");
 	    publishCloud(pubMapWorld, cloudGlobalMapDS, timeLaserInfoStamp, "map");
 
@@ -1509,7 +1525,20 @@ public:
             pose_odomTo_map.pose.orientation.y = q_odomTo_map.y();
             pose_odomTo_map.pose.orientation.z = q_odomTo_map.z();
             pose_odomTo_map.pose.orientation.w = q_odomTo_map.w();
+            // map -> odom
             pubOdomToMapPose.publish(pose_odomTo_map);
+
+            static tf::TransformBroadcaster br;
+            tf::Transform transform;
+            tf::Quaternion rotation;
+            transform.setOrigin(tf::Vector3(deltax, deltay, deltaz));
+            rotation.setW(q_odomTo_map.w());
+            rotation.setX(q_odomTo_map.x());
+            rotation.setY(q_odomTo_map.y());
+            rotation.setZ(q_odomTo_map.z());
+            transform.setRotation(rotation);
+            br.sendTransform(tf::StampedTransform(transform, timeLaserInfoStamp, "map", "odom"));
+
 
         }
 
@@ -1527,6 +1556,8 @@ public:
             return;
         }*/
 
+        // std::cout << "cloud key pose size: " << cloudKeyPoses3D->points.size() << std::endl;
+
 	    if (cloudKeyPoses3D->points.empty() == true)
             return;
 
@@ -1538,9 +1569,10 @@ public:
             latestFrameIDGlobalLocalize = win_cloudKeyPoses3D.size() - 1;
 
             pcl::PointCloud<PointType>::Ptr latestCloudIn(new pcl::PointCloud<PointType>());
+            // latestCloudIn: base_link  -> odom
             *latestCloudIn += *transformPointCloud(win_cornerCloudKeyFrames[latestFrameIDGlobalLocalize], &win_cloudKeyPoses6D[latestFrameIDGlobalLocalize]);
             *latestCloudIn += *transformPointCloud(win_surfCloudKeyFrames[latestFrameIDGlobalLocalize],   &win_cloudKeyPoses6D[latestFrameIDGlobalLocalize]);
-            std::cout << "the size of input cloud: " << latestCloudIn->points.size() <<std::endl;
+            // std::cout << "the size of input cloud: " << latestCloudIn->points.size() <<std::endl;
 
             mtxWin.unlock();
 
@@ -1561,7 +1593,8 @@ public:
         pcl::NormalDistributionsTransform<PointType, PointType> ndt;
         ndt.setTransformationEpsilon(0.01);
         ndt.setResolution(1.0);
-
+        ndt.setMaximumIterations(20);
+        ndt.setStepSize(0.1);
 
         pcl::IterativeClosestPoint<PointType, PointType> icp;
         icp.setMaxCorrespondenceDistance(100);
@@ -1580,7 +1613,9 @@ public:
         Eigen::Matrix4f matricInitGuess = transodomToWorld_init.matrix();
 	    //std::cout << "matricInitGuess: " << matricInitGuess << std::endl;
         //Firstly perform ndt in coarse resolution
+        // odom
         ndt.setInputSource(latestCloudIn);
+        // map
         ndt.setInputTarget(cloudGlobalMapDS);
         pcl::PointCloud<PointType>::Ptr unused_result_0(new pcl::PointCloud<PointType>());
         ndt.align(*unused_result_0, matricInitGuess);
@@ -1590,7 +1625,7 @@ public:
         pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
         icp.align(*unused_result, ndt.getFinalTransformation());
 
-        std::cout << "ICP converg flag:" << icp.hasConverged() << ". Fitness score: " << icp.getFitnessScore() << std::endl << std::endl;
+        std::cout << "ICP converg flag: " << icp.hasConverged() << "  Fitness score: " << icp.getFitnessScore() << std::endl;
 
 
         //if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore)
@@ -1613,11 +1648,34 @@ public:
         mtxtranformOdomToWorld.unlock();
         //publish the laserpointcloud in world frame
 
+
+        Eigen::Affine3f transbaseToOdom = pcl::getTransformation(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5],
+                                                                 transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
+
+        Eigen::Affine3f transbaseToWorld = transodomToWorld_New * transbaseToOdom;
+        float x_g, y_g, z_g, R_g, P_g, Y_g;
+        pcl::getTranslationAndEulerAngles(transbaseToWorld, x_g, y_g, z_g, R_g, P_g, Y_g);
+
+        mtxtranformOdomToWorld.lock();
+        // renew transbaseToWorld
+        transformInTheWorld[0] = R_g;
+        transformInTheWorld[1] = P_g;
+        transformInTheWorld[2] = Y_g;
+        transformInTheWorld[3] = x_g;
+        transformInTheWorld[4] = y_g;
+        transformInTheWorld[5] = z_g;
+        mtxtranformOdomToWorld.unlock();
+
+        
         //publish global map
         publishCloud(pubMapWorld, cloudGlobalMapDS, timeLaserInfoStamp, "map");//publish world map
 
+        // std::cout << icp.hasConverged() << std::endl;
+        // std::cout << icp.getFitnessScore() << std::endl;
+
         if (icp.hasConverged() == true && icp.getFitnessScore() < historyKeyframeFitnessScore)
         {
+            // std::cout << "Matching Succeed" << std::endl;
             geometry_msgs::PoseStamped pose_odomTo_map;
             tf::Quaternion q_odomTo_map = tf::createQuaternionFromRPY(roll, pitch, yaw);
 
@@ -1629,6 +1687,47 @@ public:
             pose_odomTo_map.pose.orientation.z = q_odomTo_map.z();
             pose_odomTo_map.pose.orientation.w = q_odomTo_map.w();
             pubOdomToMapPose.publish(pose_odomTo_map);
+
+
+            static tf::TransformBroadcaster br;
+            tf::Transform transform;
+            tf::Quaternion rotation;
+            transform.setOrigin(tf::Vector3(x, y, z));
+            rotation.setW(q_odomTo_map.w());
+            rotation.setX(q_odomTo_map.x());
+            rotation.setY(q_odomTo_map.y());
+            rotation.setZ(q_odomTo_map.z());
+            transform.setRotation(rotation);
+            br.sendTransform(tf::StampedTransform(transform, timeLaserInfoStamp, "map", "odom"));
+
+
+            // map -> base_link
+            geometry_msgs::PoseStamped pose_To_map;
+            tf::Quaternion q_To_map = tf::createQuaternionFromRPY(R_g, P_g, Y_g);
+
+            pose_To_map.header.stamp = timeLaserInfoStamp;
+            pose_To_map.header.frame_id = "map";
+            pose_To_map.pose.position.x = x_g;
+            pose_To_map.pose.position.y = y_g;
+            pose_To_map.pose.position.z = z_g;
+            pose_To_map.pose.orientation.x = q_To_map.x();
+            pose_To_map.pose.orientation.y = q_To_map.y();
+            pose_To_map.pose.orientation.z = q_To_map.z();
+            pose_To_map.pose.orientation.w = q_To_map.w();
+            pubPoseToMap.publish(pose_To_map);
+
+
+            globalPath.poses.push_back(pose_To_map);
+    
+            // publish path
+            if (pubPath.getNumSubscribers() != 0)
+            {
+                globalPath.header.stamp = timeLaserInfoStamp;
+                globalPath.header.frame_id = "map";
+                pubPath.publish(globalPath);
+            }
+
+
         }
 
 

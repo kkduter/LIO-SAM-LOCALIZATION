@@ -7,6 +7,9 @@
     <!-- Parameters -->
     <rosparam file="$(find lio_sam)/config/params.yaml" command="load" />
 
+    <node name="map_child_tf_publisher" pkg="tf" type="static_transform_publisher"
+          args="0 0 0 0 0 0 map map_child 100"/>
+
     <!--- LOAM -->
     <include file="$(find lio_sam)/launch/include/module_relocolize.launch" />
 

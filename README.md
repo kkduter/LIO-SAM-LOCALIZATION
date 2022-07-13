@@ -4,20 +4,18 @@
 # RUN
 ```
 roslaunch lio_sam run_relocalize.launch
-rosbag play 2020-03-14-16-45-35.bag
+rosbag play --clock 2020-03-14-16-45-35.bag
 ```
 
 # RESULT
 
-轨迹图
-![](result/lio_traj.png)
+GPS轨迹未对齐
+![](result/LIO-SAM-not-aligned.png)
 
-绝对轨迹误差
-```
-evo_ape kitti lio_gps.txt lio_state.txt -r full --plot --plot_mode xy -a
-```
-![](result/lio_绝对轨迹误差.png)
-![](result/lio_绝对轨迹误差_map.png)
+GPS轨迹对齐
+![](result/LIO-SAM-aligned.png)
+
+
 
 
 # LIO-SAM
